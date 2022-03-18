@@ -7,8 +7,9 @@ import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/Counters.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
-contract Marketplace is Ownable {
+contract Marketplace is Ownable, ReentrancyGuard {
   using Counters for Counters.Counter;
   using SafeERC20 for IERC20;
 
@@ -111,6 +112,7 @@ contract Marketplace is Ownable {
   function executeOrderWithEther(uint256 orderId_)
     public
     payable
+    nonReentrant
     returns (bool)
   {
     Order storage order = orders[orderId_];

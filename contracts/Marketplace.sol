@@ -8,8 +8,10 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/Counters.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 contract Marketplace is Ownable, ReentrancyGuard {
+  using EnumerableSet for EnumerableSet.AddressSet;
   using Counters for Counters.Counter;
   using SafeERC20 for IERC20;
 
@@ -22,7 +24,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
   }
 
   IERC721 public immutable nftContract;
-  mapping(address => uint256) public paymentTokens;
+  EnumerableSet.AddressSet private _acceptedPaymentTokens;
 
   event OrderAdded(
     uint256 orderId,
@@ -41,24 +43,21 @@ contract Marketplace is Ownable, ReentrancyGuard {
     address paymentToken
   );
 
-  mapping(uint256 => Order) public orders;
-  Counters.Counter public orderId;
+  mapping(uint256 => Order) private _orders;
+  Counters.Counter private _orderIdCounter;
 
   constructor(address nftContractAddress_) {
     nftContract = IERC721(nftContractAddress_);
   }
 
-  function addPaymentToken(address tokenAddress, uint256 rate)
-    public
-    onlyOwner
-  {
+  function addPaymentToken(address tokenAddress) public onlyOwner {
     require(tokenAddress != address(0), "Invalid token address");
-    paymentTokens[tokenAddress] = rate;
+    _acceptedPaymentTokens.add(tokenAddress);
   }
 
   function removePaymentToken(address tokenAddress) public onlyOwner {
     require(tokenAddress != address(0), "Invalid token address");
-    delete paymentTokens[tokenAddress];
+    _acceptedPaymentTokens.remove(tokenAddress);
   }
 
   function addOrder(
@@ -76,32 +75,33 @@ contract Marketplace is Ownable, ReentrancyGuard {
       "NFT is not approved for sale yet"
     );
     require(
-      paymentToken == address(0) || paymentTokens[paymentToken] != 0,
+      paymentToken == address(0) ||
+        _acceptedPaymentTokens.contains(paymentToken) == true,
       "Payment Token is not supported"
     );
 
     nftContract.transferFrom(_msgSender(), address(this), tokenId);
 
-    uint256 _orderId = orderId.current();
-    Order storage order = orders[_orderId];
+    uint256 _orderId = _orderIdCounter.current();
+    Order storage order = _orders[_orderId];
     order.tokenId = tokenId;
     order.seller = _msgSender();
     order.buyer = address(0);
     order.price = price;
     order.paymentToken = paymentToken;
-    orderId.increment();
+    _orderIdCounter.increment();
 
     emit OrderAdded(_orderId, tokenId, _msgSender(), price, paymentToken);
     return true;
   }
 
   function cancelOrder(uint256 orderId_) public returns (bool) {
-    Order memory order = orders[orderId_];
+    Order memory order = _orders[orderId_];
     require(order.buyer == address(0), "Item is already bought, cannot cancel");
     require(order.seller == _msgSender(), "Only onwer can cancel the order");
 
     uint256 _tokenId = order.tokenId;
-    delete orders[orderId_];
+    delete _orders[orderId_];
 
     nftContract.transferFrom(address(this), _msgSender(), _tokenId);
 
@@ -115,7 +115,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
     nonReentrant
     returns (bool)
   {
-    Order storage order = orders[orderId_];
+    Order storage order = _orders[orderId_];
     uint256 price = msg.value;
 
     _transferNFT(orderId_, price);
@@ -139,7 +139,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
     uint256 price,
     address paymentToken
   ) public returns (bool) {
-    Order memory order = orders[orderId_];
+    Order memory order = _orders[orderId_];
     require(
       order.paymentToken == paymentToken,
       "Payment token must be the same with the order"
@@ -161,7 +161,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
   }
 
   function _transferNFT(uint256 orderId_, uint256 price) internal {
-    Order storage order = orders[orderId_];
+    Order storage order = _orders[orderId_];
 
     require(order.seller != address(0), "Order does not exist");
     require(

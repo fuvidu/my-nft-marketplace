@@ -7,7 +7,6 @@ import "hardhat/console.sol";
 
 contract Gold is ERC20 {
   uint256 constant TOTAL_SUPPLY = 10**6;
-  uint256 public rate = 1000;
 
   constructor() ERC20("Gold Token", "GLD") {
     _mint(_msgSender(), TOTAL_SUPPLY);

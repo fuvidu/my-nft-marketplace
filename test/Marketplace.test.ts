@@ -1,14 +1,14 @@
 import { SignerWithAddress } from '@nomiclabs/hardhat-ethers/signers';
 const { ethers } = require('hardhat');
-const { expect } = require('chai');
+import { expect } from 'chai';
 import INFT from './INFT';
 import IMarketplace from './IMarketplace';
 import { Contract, ContractReceipt, ContractTransaction } from 'ethers';
 import { Event } from 'ethers';
 
-const SALE_PRICE = ethers.utils.parseEther('1');
+const SALE_PRICE = ethers.utils.parseEther('1.0');
 const NULL_ADDRESS = '0x0000000000000000000000000000000000000000';
-const GOLD_RATE = 1000;
+const ONE_ETHER = ethers.utils.parseEther('1.0');
 
 describe('Marketplace', () => {
   let marketplaceContract: IMarketplace;
@@ -37,7 +37,7 @@ describe('Marketplace', () => {
     await goldToken.transfer(user1.address, 10000);
     await goldToken.transfer(user2.address, 20000);
 
-    await marketplaceContract.addPaymentToken(goldToken.address, GOLD_RATE);
+    await marketplaceContract.addPaymentToken(goldToken.address, goldToken.decimals());
   }
 
   beforeEach(setup);
@@ -120,85 +120,173 @@ describe('Marketplace', () => {
   });
 
   describe('execute order with ether', () => {
-    it('should throw if order does not exist', async () => {
-      const tokenId = await mintNFT(nftContract);
-      const [orderId] = await createOrder(marketplaceContract, tokenId, SALE_PRICE, NULL_ADDRESS);
-      const doesNotExitOrderId = orderId + 1;
-      await expect(
-        marketplaceContract.executeOrderWithEther(doesNotExitOrderId, { value: SALE_PRICE }),
-      ).to.be.revertedWith('Order does not exist');
+    describe('when order does not exist', () => {
+      it('should throw the message "Order does not exist"', async () => {
+        const tokenId = await mintNFT(nftContract);
+        const [orderId] = await createOrder(marketplaceContract, tokenId, SALE_PRICE, NULL_ADDRESS);
+        const doesNotExitOrderId = orderId + 1;
+        await expect(
+          marketplaceContract.executeOrderWithEther(doesNotExitOrderId, { value: SALE_PRICE }),
+        ).to.be.revertedWith('Order does not exist');
+      });
     });
 
-    it('should throw if buyer and seller are same', async () => {
-      const tokenId = await mintNFT(nftContract);
-      const [orderId] = await createOrder(marketplaceContract, tokenId, SALE_PRICE, NULL_ADDRESS);
-      await expect(
-        marketplaceContract.executeOrderWithEther(orderId, {
-          value: ethers.utils.parseEther('0.2'),
-        }),
-      ).to.be.revertedWith('Seller must be different than buyer');
+    describe('when buyer and seller are same', () => {
+      it('should throw the message "Seller must be different than buyer"', async () => {
+        const tokenId = await mintNFT(nftContract);
+        const [orderId] = await createOrder(marketplaceContract, tokenId, SALE_PRICE, NULL_ADDRESS);
+        await expect(
+          marketplaceContract.executeOrderWithEther(orderId, {
+            value: ethers.utils.parseEther('0.2'),
+          }),
+        ).to.be.revertedWith('Seller must be different than buyer');
+      });
     });
 
-    it('should throw if price has changed', async () => {
-      const tokenId = await mintNFT(nftContract);
-      const [orderId] = await createOrder(marketplaceContract, tokenId, SALE_PRICE, NULL_ADDRESS);
-      const contractWithBuyer: IMarketplace = (await marketplaceContract.connect(
-        user1,
-      )) as unknown as IMarketplace;
-      await expect(
-        contractWithBuyer.executeOrderWithEther(orderId, {
-          value: ethers.utils.parseEther('0.02'),
-        }),
-      ).to.be.revertedWith('Price has changed');
+    describe('when buy price does not match the sell price', () => {
+      it('should throw the message "Price does not match"', async () => {
+        const tokenId = await mintNFT(nftContract);
+        const [orderId] = await createOrder(marketplaceContract, tokenId, SALE_PRICE, NULL_ADDRESS);
+        const contractWithBuyer: IMarketplace = (await marketplaceContract.connect(
+          user1,
+        )) as unknown as IMarketplace;
+        await expect(
+          contractWithBuyer.executeOrderWithEther(orderId, {
+            value: ethers.utils.parseEther('0.02'),
+          }),
+        ).to.be.revertedWith('Price does not match');
+      });
     });
 
-    it('should deduct ether from buyer', async () => {
-      // owner mints
-      const tokenId = await mintNFT(nftContract);
+    describe('when commission rate > 0 and beneficiary is not empty', () => {
+      it('should transfer ether from buyer to seller and benificiary', async () => {
+        const commissionRate = 5;
+        const commission = SALE_PRICE.mul(commissionRate).div(100);
+        const paidAmount = SALE_PRICE.sub(commission);
+        await marketplaceContract.setCommisionRate(commissionRate);
+        await marketplaceContract.setCommissionBeneficiary(deployer.address);
 
-      // owner sells
-      const [orderId] = await createOrder(marketplaceContract, tokenId, SALE_PRICE, NULL_ADDRESS);
+        // seller mints
+        const tokenId = await mintNFT((await nftContract.connect(user1)) as unknown as INFT);
 
-      // buyer buys
-      const marketplaceWithBuyer: IMarketplace = (await marketplaceContract.connect(
-        user1,
-      )) as unknown as IMarketplace;
+        // seller sells
+        const marketplaceWithSeller: IMarketplace = (await marketplaceContract.connect(
+          user1,
+        )) as unknown as IMarketplace;
+        const [orderId] = await createOrder(
+          marketplaceWithSeller,
+          tokenId,
+          SALE_PRICE,
+          NULL_ADDRESS,
+        );
 
-      // verify buyer's balance
-      const balanceBefore = await user1.getBalance();
-      await marketplaceWithBuyer.executeOrderWithEther(orderId, { value: SALE_PRICE });
-      const balanceAfter = await user1.getBalance();
-      // we need to subtract for the Gas fee
-      expect(balanceAfter).to.be.below(balanceBefore.sub(SALE_PRICE));
+        // buyer buys
+        const marketplaceWithBuyer: IMarketplace = (await marketplaceContract.connect(
+          user2,
+        )) as unknown as IMarketplace;
+        const sellerBalanceBefore = await user1.getBalance();
+        //const buyerBalanceBefore = await user2.getBalance();
+        const beneficiaryBalanceBefore = await deployer.getBalance();
+        const transaction: ContractTransaction = await marketplaceWithBuyer.executeOrderWithEther(
+          orderId,
+          {
+            value: SALE_PRICE,
+          },
+        );
+        const receipt = await transaction.wait();
+        const sellerBalanceAfter = await user1.getBalance();
+        //const buyerBalanceAfter = await user2.getBalance();
+        const beneficiaryBalanceAfter = await deployer.getBalance();
+        expect(beneficiaryBalanceAfter).to.equals(beneficiaryBalanceBefore.add(commission));
+        expect(sellerBalanceAfter).to.be.equal(sellerBalanceBefore.add(paidAmount));
+        // TODO: this is not correct?
+        // expect(buyerBalanceBefore.sub(buyerBalanceAfter)).to.be.equal(
+        //   SALE_PRICE.add(receipt.gasUsed),
+        // );
+      });
     });
 
-    it('should add ether to seller', async () => {
-      // seller mints
-      const tokenId = await mintNFT((await nftContract.connect(user1)) as unknown as INFT);
+    describe('when commission rate == 0', () => {
+      it('should give full amount of sell price to seller', async () => {
+        const commissionRate = 0;
+        const commission = SALE_PRICE.mul(commissionRate).div(100);
+        const paidAmount = SALE_PRICE.sub(commission);
+        await marketplaceContract.setCommisionRate(commissionRate);
+        await marketplaceContract.setCommissionBeneficiary(deployer.address);
 
-      // seller sells
-      const marketplaceWithSeller: IMarketplace = (await marketplaceContract.connect(
-        user1,
-      )) as unknown as IMarketplace;
-      const [orderId] = await createOrder(marketplaceWithSeller, tokenId, SALE_PRICE, NULL_ADDRESS);
+        // seller mints
+        const tokenId = await mintNFT((await nftContract.connect(user1)) as unknown as INFT);
 
-      // buyer buys
-      const marketplaceWithBuyer: IMarketplace = (await marketplaceContract.connect(
-        user2,
-      )) as unknown as IMarketplace;
-      const balanceBefore = await user1.getBalance();
-      const transaction: ContractTransaction = await marketplaceWithBuyer.executeOrderWithEther(
-        orderId,
-        {
-          value: SALE_PRICE,
-        },
-      );
-      const receipt = await transaction.wait();
-      const balanceAfter = await user1.getBalance();
+        // seller sells
+        const marketplaceWithSeller: IMarketplace = (await marketplaceContract.connect(
+          user1,
+        )) as unknown as IMarketplace;
+        const [orderId] = await createOrder(
+          marketplaceWithSeller,
+          tokenId,
+          SALE_PRICE,
+          NULL_ADDRESS,
+        );
 
-      //verify seller's balance
-      // some gas fee has been subtracted when transfer ether inside executeOrderWithEther
-      expect(balanceAfter).to.be.above(balanceBefore.add(SALE_PRICE).sub(receipt.gasUsed));
+        // buyer buys
+        const marketplaceWithBuyer: IMarketplace = (await marketplaceContract.connect(
+          user2,
+        )) as unknown as IMarketplace;
+        const sellerBalanceBefore = await user1.getBalance();
+        const beneficiaryBalanceBefore = await deployer.getBalance();
+        const transaction: ContractTransaction = await marketplaceWithBuyer.executeOrderWithEther(
+          orderId,
+          {
+            value: SALE_PRICE,
+          },
+        );
+        const receipt = await transaction.wait();
+        const sellerBalanceAfter = await user1.getBalance();
+        const beneficiaryBalanceAfter = await deployer.getBalance();
+        expect(beneficiaryBalanceAfter).to.equals(beneficiaryBalanceBefore.add(commission));
+        expect(sellerBalanceAfter).to.be.equal(sellerBalanceBefore.add(paidAmount));
+      });
+    });
+
+    describe('when beneficiary is empty', () => {
+      it('should give full amount of sell price to seller', async () => {
+        const commissionRate = 5;
+        const commission = SALE_PRICE.mul(commissionRate).div(100);
+        const paidAmount = SALE_PRICE.sub(commission);
+        await marketplaceContract.setCommisionRate(commissionRate);
+
+        // seller mints
+        const tokenId = await mintNFT((await nftContract.connect(user1)) as unknown as INFT);
+
+        // seller sells
+        const marketplaceWithSeller: IMarketplace = (await marketplaceContract.connect(
+          user1,
+        )) as unknown as IMarketplace;
+        const [orderId] = await createOrder(
+          marketplaceWithSeller,
+          tokenId,
+          SALE_PRICE,
+          NULL_ADDRESS,
+        );
+
+        // buyer buys
+        const marketplaceWithBuyer: IMarketplace = (await marketplaceContract.connect(
+          user2,
+        )) as unknown as IMarketplace;
+        const sellerBalanceBefore = await user1.getBalance();
+        const beneficiaryBalanceBefore = await deployer.getBalance();
+        const transaction: ContractTransaction = await marketplaceWithBuyer.executeOrderWithEther(
+          orderId,
+          {
+            value: SALE_PRICE,
+          },
+        );
+        const receipt = await transaction.wait();
+        const sellerBalanceAfter = await user1.getBalance();
+        const beneficiaryBalanceAfter = await deployer.getBalance();
+        expect(beneficiaryBalanceAfter).to.equals(beneficiaryBalanceBefore.add(commission));
+        expect(sellerBalanceAfter).to.be.equal(sellerBalanceBefore.add(paidAmount));
+      });
     });
 
     it('should transfer NFT to buyer', async () => {
@@ -246,13 +334,16 @@ describe('Marketplace', () => {
       );
       const receipt = await transaction.wait();
       const event = receipt.events?.find((event: Event) => event.event === 'OrderExecuted');
-      const [_orderId, _tokenId, _seller, _buyer, _price] = event?.args ? event.args : [];
+      const [_orderId, _tokenId, _seller, _buyer, _price, _paymentTokenAddess] = event?.args
+        ? event.args
+        : [];
 
       expect(_orderId).to.equals(orderId);
       expect(_tokenId).to.equals(tokenId);
       expect(_seller).to.equals(user1.address);
       expect(_buyer).to.equals(user2.address);
       expect(_price).to.equals(SALE_PRICE);
+      expect(_paymentTokenAddess).to.equals(NULL_ADDRESS);
     });
   });
 

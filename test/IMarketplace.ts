@@ -15,4 +15,6 @@ export default interface IMarketplace extends Contract {
   ): Promise<ContractTransaction>;
   addPaymentToken(address: string, rate: number): Promise<ContractTransaction>;
   removePaymentToken(address: string): Promise<ContractTransaction>;
+  setCommisionRate(commissionRate: number): Promise<ContractTransaction>;
+  setCommissionBeneficiary(beneficiary: string): Promise<ContractTransaction>;
 }

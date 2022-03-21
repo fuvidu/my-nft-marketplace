@@ -8,23 +8,11 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/Counters.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 contract Marketplace is Ownable, ReentrancyGuard {
-  using EnumerableSet for EnumerableSet.AddressSet;
   using Counters for Counters.Counter;
   using SafeERC20 for IERC20;
-
-  struct Order {
-    uint256 tokenId;
-    address seller;
-    address buyer;
-    uint256 price;
-    address paymentToken;
-  }
-
-  IERC721 public immutable nftContract;
-  EnumerableSet.AddressSet private _acceptedPaymentTokens;
+  using Address for address;
 
   event OrderAdded(
     uint256 orderId,
@@ -42,7 +30,22 @@ contract Marketplace is Ownable, ReentrancyGuard {
     uint256 price,
     address paymentToken
   );
+  event Transfer(address from, address to, uint256 amount);
 
+  struct Order {
+    uint256 tokenId;
+    address seller;
+    address buyer;
+    uint256 price;
+    address paymentToken;
+  }
+
+  uint8 public commissionRate; // percentage value
+  address public commissionBeneficiary;
+
+  IERC721 public immutable nftContract;
+  // address => decimals
+  mapping(address => uint8) private _acceptedPaymentTokens;
   mapping(uint256 => Order) private _orders;
   Counters.Counter private _orderIdCounter;
 
@@ -50,14 +53,26 @@ contract Marketplace is Ownable, ReentrancyGuard {
     nftContract = IERC721(nftContractAddress_);
   }
 
-  function addPaymentToken(address tokenAddress) public onlyOwner {
+  function addPaymentToken(address tokenAddress, uint8 decimals)
+    public
+    onlyOwner
+  {
     require(tokenAddress != address(0), "Invalid token address");
-    _acceptedPaymentTokens.add(tokenAddress);
+    _acceptedPaymentTokens[tokenAddress] = decimals;
   }
 
   function removePaymentToken(address tokenAddress) public onlyOwner {
     require(tokenAddress != address(0), "Invalid token address");
-    _acceptedPaymentTokens.remove(tokenAddress);
+    delete _acceptedPaymentTokens[tokenAddress];
+  }
+
+  function setCommisionRate(uint8 _commissionRate) external onlyOwner {
+    commissionRate = _commissionRate;
+  }
+
+  function setCommissionBeneficiary(address beneficiary) external onlyOwner {
+    require(beneficiary != address(0), "Invalid address");
+    commissionBeneficiary = beneficiary;
   }
 
   function addOrder(
@@ -75,8 +90,7 @@ contract Marketplace is Ownable, ReentrancyGuard {
       "NFT is not approved for sale yet"
     );
     require(
-      paymentToken == address(0) ||
-        _acceptedPaymentTokens.contains(paymentToken) == true,
+      paymentToken == address(0) || _acceptedPaymentTokens[paymentToken] != 0,
       "Payment Token is not supported"
     );
 
@@ -113,14 +127,31 @@ contract Marketplace is Ownable, ReentrancyGuard {
     public
     payable
     nonReentrant
+    canExecuteOrder(orderId_)
     returns (bool)
   {
     Order storage order = _orders[orderId_];
     uint256 price = msg.value;
 
-    _transferNFT(orderId_, price);
-    (bool successful, ) = payable(order.seller).call{value: price}("");
+    require(order.price == price, "Price does not match");
+    _transferNFT(orderId_);
+
+    uint256 commission = _calculateCommission(price, commissionRate);
+    if (commission > 0) {
+      (bool _successful, ) = payable(commissionBeneficiary).call{
+        value: commission
+      }("");
+      require(
+        _successful,
+        "Failed to transfer money to commission beneficiary"
+      );
+      emit Transfer(_msgSender(), commissionBeneficiary, commission);
+    }
+
+    uint256 paymentAmount = price - commission;
+    (bool successful, ) = payable(order.seller).call{value: paymentAmount}("");
     require(successful, "Failed to transfer money to seller");
+    emit Transfer(_msgSender(), order.seller, paymentAmount);
 
     emit OrderExecuted(
       orderId_,
@@ -138,15 +169,29 @@ contract Marketplace is Ownable, ReentrancyGuard {
     uint256 orderId_,
     uint256 price,
     address paymentToken
-  ) public returns (bool) {
-    Order memory order = _orders[orderId_];
+  ) public canExecuteOrder(orderId_) returns (bool) {
+    Order storage order = _orders[orderId_];
     require(
       order.paymentToken == paymentToken,
       "Payment token must be the same with the order"
     );
+    require(order.price == price, "Price does not match");
 
-    IERC20(paymentToken).safeTransferFrom(_msgSender(), order.seller, price);
-    _transferNFT(orderId_, price);
+    _transferNFT(orderId_);
+    uint256 commission = _calculateCommission(price, commissionRate);
+    if (commission > 0) {
+      IERC20(paymentToken).safeTransferFrom(
+        _msgSender(),
+        commissionBeneficiary,
+        commission
+      );
+    }
+
+    IERC20(paymentToken).safeTransferFrom(
+      _msgSender(),
+      order.seller,
+      price - commission
+    );
 
     emit OrderExecuted(
       orderId_,
@@ -160,17 +205,27 @@ contract Marketplace is Ownable, ReentrancyGuard {
     return true;
   }
 
-  function _transferNFT(uint256 orderId_, uint256 price) internal {
-    Order storage order = _orders[orderId_];
+  function _calculateCommission(uint256 price, uint8 rate)
+    private
+    view
+    returns (uint256)
+  {
+    return commissionBeneficiary != address(0) ? ((price * rate) / 100) : 0;
+  }
 
+  modifier canExecuteOrder(uint256 orderId) {
+    Order memory order = _orders[orderId];
     require(order.seller != address(0), "Order does not exist");
     require(
       order.seller != _msgSender(),
       "Seller must be different than buyer"
     );
-    require(order.price == price, "Price has changed");
     require(order.buyer == address(0), "Order is already bought");
+    _;
+  }
 
+  function _transferNFT(uint256 orderId_) internal {
+    Order storage order = _orders[orderId_];
     order.buyer = _msgSender();
     nftContract.transferFrom(address(this), _msgSender(), order.tokenId);
   }
